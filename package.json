@@ -1,0 +1,56 @@
+{
+    "author": "Vinayla",
+    "dependencies": {
+        "@smallstoneapps/linked-list": "^1.4.0"
+    },
+    "keywords": [
+        "pebble-app"
+    ],
+    "name": "watchface-tutorial",
+    "pebble": {
+        "displayName": "Tutorial Watchface",
+        "enableMultiJS": true,
+        "messageKeys": [],
+        "projectType": "native",
+        "resources": {
+            "media": [
+                {
+                    "file": "fonts/Futura.ttf",
+                    "name": "FONT_FUTURA_42",
+                    "targetPlatforms": null,
+                    "type": "font"
+                },
+                {
+                    "file": "images/BoomBW.png",
+                    "name": "IMAGE_BAKUGO",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/Boom.png",
+                    "name": "BOOM",
+                    "targetPlatforms": [
+                        "emery"
+                    ],
+                    "type": "bitmap"
+                },
+                {
+                    "characterRegex": "[0-9: ]",
+                    "file": "fonts/BADABOOM.ttf",
+                    "name": "FONT_BADA_75",
+                    "targetPlatforms": null,
+                    "type": "font"
+                }
+            ]
+        },
+        "sdkVersion": "3",
+        "targetPlatforms": [
+            "emery"
+        ],
+        "uuid": "f9015cad-a994-43c8-9fcc-328daa4b952a",
+        "watchapp": {
+            "watchface": true
+        }
+    },
+    "version": "1.0.0"
+}

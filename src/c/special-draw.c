@@ -1,0 +1,99 @@
+#include "special-draw.h"
+
+// PATCHED: the original library only defines 144x168 (classic Pebble) and
+// 180x180 (old round Chalk) sizes - neither matches Emery's real 200x228.
+// Defining this before the library's own #if/#ifndef check means its
+// fallback (wrong) value is skipped in favor of this one.
+#ifndef SPECIAL_DRAW_SCREEN_SIZE
+#define SPECIAL_DRAW_SCREEN_SIZE (GSize(200, 228))
+#endif
+
+#if defined(PBL_RECT) && !defined(SPECIAL_DRAW_SCREEN_SIZE)
+#define SPECIAL_DRAW_SCREEN_SIZE (GSize(144, 168))
+#elif defined(PBL_ROUND) && !defined(SPECIAL_DRAW_SCREEN_SIZE)
+#define SPECIAL_DRAW_SCREEN_SIZE (GSize(180, 180))
+#endif
+
+GSpecialSession * graphics_context_begin_special_draw(GContext * ctx) {
+    GSpecialSession * session = malloc(sizeof(GSpecialSession));
+    // PATCHED: the original library never initializes draw_modifier, so it
+    // starts as uninitialized garbage from malloc() - which, since heap
+    // allocators often reuse just-freed memory, frequently turns out to be
+    // a stale pointer to a modifier a *previous* session already destroyed.
+    // That caused a double-free the moment add_modifier was called again.
+    session->draw_modifier = NULL;
+    // Defaults
+    session->modifier_root = linked_list_create_root();
+    // Initialize
+    session->ctx = ctx;
+    session->compositing_mode = PBL_IF_BW_ELSE(GCompOpClear, GCompOpSet);
+    session->old_fbuf = graphics_capture_frame_buffer(session->ctx);
+    session->initial_data = gbitmap_get_data(session->old_fbuf);
+    session->old_format = gbitmap_get_format(session->old_fbuf);
+    session->old_row_size = gbitmap_get_bytes_per_row(session->old_fbuf);
+    graphics_release_frame_buffer(session->ctx, session->old_fbuf);
+    session->new_fbuf =
+        gbitmap_create_blank(SPECIAL_DRAW_SCREEN_SIZE,
+            gbitmap_get_format(session->old_fbuf));
+    gbitmap_set_data(session->old_fbuf,
+                     gbitmap_get_data(session->new_fbuf),
+                     gbitmap_get_format(session->new_fbuf),
+                     gbitmap_get_bytes_per_row(session->new_fbuf), false);
+    return session;
+}
+
+void graphics_context_special_session_set_compositing_mode(
+        GSpecialSession * session, GCompOp op) {
+    session->compositing_mode = op;
+}
+
+static bool prv_apply_modifier(void * _modifier,
+        void * _session) {
+    GSpecialSessionModifier * modifier = _modifier;
+    GSpecialSession * session = _session;
+    modifier->action.modifier_run(modifier, session->new_fbuf);
+    return true;
+}
+
+static bool prv_destroy_modifier(void * _modifier,
+        void * _session) {
+    GSpecialSessionModifier * modifier = _modifier;
+    modifier->destroy(modifier);
+    return true;
+}
+
+void graphics_context_end_special_draw(GSpecialSession * session) {
+    gbitmap_set_data(session->old_fbuf, session->initial_data,
+                     session->old_format, session->old_row_size, false);
+    graphics_context_set_compositing_mode(session->ctx,
+        session->compositing_mode);
+    linked_list_foreach(session->modifier_root, prv_apply_modifier, session);
+    if (session->draw_modifier) {
+        session->draw_modifier->action.modifier_draw(
+            session->ctx, session->draw_modifier, session->new_fbuf);
+        session->draw_modifier->destroy(session->draw_modifier);
+    } else {
+        graphics_draw_bitmap_in_rect(session->ctx, session->new_fbuf,
+            (GRect) {GPointZero, SPECIAL_DRAW_SCREEN_SIZE});
+    }
+    linked_list_foreach(session->modifier_root, prv_destroy_modifier, session);
+    linked_list_clear(session->modifier_root);
+    free(session->modifier_root);
+    gbitmap_destroy(session->new_fbuf);
+    free(session);
+}
+
+void graphics_context_special_session_add_modifier(GSpecialSession * session,
+        GSpecialSessionModifier * modifier) {
+    if (modifier->overrides_draw) {
+        if (session->draw_modifier) {
+            APP_LOG(APP_LOG_LEVEL_WARNING, "Replacing previous draw modifier"
+                "%p with new modifier %p. Destroying previous draw modifier.",
+                session->draw_modifier, modifier);
+            session->draw_modifier->destroy(session->draw_modifier);
+        }
+        session->draw_modifier = modifier;
+    } else {
+        linked_list_append(session->modifier_root, modifier);
+    }
+}
