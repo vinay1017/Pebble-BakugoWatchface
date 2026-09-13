@@ -6,20 +6,14 @@
     "keywords": [
         "pebble-app"
     ],
-    "name": "watchface-tutorial",
+    "name": "bakugoboom",
     "pebble": {
-        "displayName": "Tutorial Watchface",
+        "displayName": "BakugoBoomWatchface",
         "enableMultiJS": true,
         "messageKeys": [],
         "projectType": "native",
         "resources": {
             "media": [
-                {
-                    "file": "fonts/Futura.ttf",
-                    "name": "FONT_FUTURA_42",
-                    "targetPlatforms": null,
-                    "type": "font"
-                },
                 {
                     "file": "images/BoomBW.png",
                     "name": "IMAGE_BAKUGO",
@@ -37,9 +31,16 @@
                 {
                     "characterRegex": "[0-9: ]",
                     "file": "fonts/BADABOOM.ttf",
-                    "name": "FONT_BADA_75",
+                    "name": "FONT_BADA_72",
                     "targetPlatforms": null,
                     "type": "font"
+                },
+                {
+                    "file": "images/TinyBoom.png",
+                    "menuIcon": true,
+                    "name": "TinyBoom",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
                 }
             ]
         },
@@ -52,5 +53,5 @@
             "watchface": true
         }
     },
-    "version": "1.0.0"
+    "version": "1.0.2"
 }
