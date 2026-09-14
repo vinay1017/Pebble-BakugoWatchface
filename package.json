@@ -1,6 +1,7 @@
 {
     "author": "Vinayla",
     "dependencies": {
+        "@rebble/clay": "^1.1.0",
         "@smallstoneapps/linked-list": "^1.4.0"
     },
     "keywords": [
@@ -8,12 +9,29 @@
     ],
     "name": "bakugoboom",
     "pebble": {
+        "capabilities": [
+            "configurable"
+        ],
         "displayName": "BakugoBoomWatchface",
         "enableMultiJS": true,
-        "messageKeys": [],
+        "messageKeys": [
+            "ShowBattery",
+            "ShowWeekday",
+            "RotatedText"
+        ],
         "projectType": "native",
         "resources": {
             "media": [
+                {
+                    "characterRegex": "[A-Za-z]",
+                    "file": "fonts/BADABOOM2.ttf",
+                    "name": "FONT_BADA_30",
+                    "targetPlatforms": [
+                        "emery",
+                        "gabbro"
+                    ],
+                    "type": "font"
+                },
                 {
                     "file": "images/BoomBW.png",
                     "name": "IMAGE_BAKUGO",
@@ -53,5 +71,5 @@
             "watchface": true
         }
     },
-    "version": "1.0.2"
+    "version": "1.1.0"
 }

@@ -6,28 +6,21 @@ static Window *s_main_window;
 static BitmapLayer *s_background_layer;
 static GBitmap *s_background_bitmap;
 static Layer *s_time_layer;
-static Layer *s_overlay_layer; // battery dots + burst - separate from
-                                 // s_time_layer so redrawing them never
-                                 // triggers the expensive special-draw
-                                 // rotation session
+static Layer *s_overlay_layer; // battery dots - separate from s_time_layer
+                                 // so redrawing it never triggers the
+                                 // expensive special-draw rotation session
 static GFont s_time_font;
+static GFont s_day_font;
 static char s_time_buffer[8];
+static char s_day_buffer[10]; // longest weekday name + null terminator
 
 static int s_battery_dots = 0; // 1-4, how many gauntlet lights are lit
 static GColor s_battery_color; // color for the lit dots, changes with charge tier
 
-// Explosion burst animation state - plays on launch and every hour.
-// Simple, cheap: filled star shapes with a black outline, no special-draw
-// involved.
-#define BURST_FRAMES 10
-#define BURST_FRAME_MS 40
-#define BURST_MAX_RADIUS 30
-#define STAR_POINTS 5
-static AppTimer *s_burst_timer;
-static bool s_burst_active = false;
-static int s_burst_frame = 0;
-static GPoint s_star_pts[STAR_POINTS * 2];
-static GPath s_star_path = { .num_points = STAR_POINTS * 2, .points = s_star_pts };
+// Settings, toggled via the Clay config page and persisted across restarts
+static bool s_show_battery = true;
+static bool s_show_weekday = true;
+static bool s_rotated_text = true; // when false, skip special-draw entirely
 
 // Draws text with a black outline of the given pixel thickness, by drawing
 // offset black copies underneath the real colored text in every direction,
@@ -80,70 +73,6 @@ static void draw_battery_dots(GContext *ctx) {
   }
 }
 
-// Computes the STAR_POINTS*2 vertices of a star (alternating outer/inner
-// radius) centered on the given point, into s_star_pts.
-static void compute_star(GPoint center, int outer_r, int inner_r) {
-  for (int i = 0; i < STAR_POINTS * 2; i++) {
-    int32_t angle = (TRIG_MAX_ANGLE * i) / (STAR_POINTS * 2);
-    int r = (i % 2 == 0) ? outer_r : inner_r;
-    s_star_pts[i].x = center.x + (sin_lookup(angle) * r) / TRIG_MAX_RATIO;
-    s_star_pts[i].y = center.y - (cos_lookup(angle) * r) / TRIG_MAX_RATIO;
-  }
-}
-
-// Explosion burst: two expanding, color-shifting star bursts centered on
-// Bakugo's gauntlets. Positions are a first estimate - nudge once you see
-// it rendered against the real art, same as every other visual feature in
-// this project. Color shifts yellow -> orange -> red across the burst to
-// suggest a fading hot flash, since Pebble doesn't do true alpha fading
-// easily on this kind of shape.
-static void draw_burst(GContext *ctx) {
-  if (!s_burst_active) return;
-
-  GPoint fist_positions[2] = {
-    {50, 190},   // left gauntlet - estimate, needs tuning
-    {150, 195}   // right gauntlet - estimate, needs tuning
-  };
-
-  int outer_r = ((s_burst_frame + 1) * BURST_MAX_RADIUS) / BURST_FRAMES;
-  int inner_r = (outer_r * 4) / 10;
-
-  GColor color;
-  if (s_burst_frame < BURST_FRAMES / 3) {
-    color = GColorYellow;
-  } else if (s_burst_frame < (2 * BURST_FRAMES) / 3) {
-    color = GColorOrange;
-  } else {
-    color = GColorRed;
-  }
-
-  graphics_context_set_fill_color(ctx, color);
-  graphics_context_set_stroke_color(ctx, GColorBlack);
-  for (int i = 0; i < 2; i++) {
-    compute_star(fist_positions[i], outer_r, inner_r);
-    gpath_draw_filled(ctx, &s_star_path);
-    gpath_draw_outline(ctx, &s_star_path);
-  }
-}
-
-static void burst_step(void *data) {
-  s_burst_timer = NULL; // this timer just fired - its handle is no longer valid
-  s_burst_frame++;
-  layer_mark_dirty(s_overlay_layer);
-  if (s_burst_frame < BURST_FRAMES) {
-    s_burst_timer = app_timer_register(BURST_FRAME_MS, burst_step, NULL);
-  } else {
-    s_burst_active = false;
-  }
-}
-
-static void start_burst(void) {
-  s_burst_active = true;
-  s_burst_frame = 0;
-  layer_mark_dirty(s_overlay_layer);
-  s_burst_timer = app_timer_register(BURST_FRAME_MS, burst_step, NULL);
-}
-
 // Custom draw callback for the time layer - TextLayer can't rotate on its
 // own, so we draw the text manually and wrap it in a special-draw rotation
 // session instead.
@@ -151,39 +80,65 @@ static void start_burst(void) {
 // IMPORTANT: special-draw expects to draw across the *whole screen*, not a
 // small sub-layer - it rotates everything around a fixed full-screen center
 // point, and Pebble clips each layer's drawing to its own small frame. So
-// this layer covers the entire window, and we position the text at its
-// real on-screen coordinates (the bubble's location) explicitly, rather
-// than relying on the layer's own (small) bounds.
+// this layer covers the entire window, and we position text at real
+// on-screen coordinates explicitly, rather than relying on the layer's own
+// (small) bounds.
 static void time_layer_update_proc(Layer *layer, GContext *ctx) {
-  // Position of the text within the full-screen canvas - box enlarged for
-  // the bigger 72px font, may need further tuning once rendered.
-  GRect text_bounds = GRect(32, 20, 160, 90);
+  // Rotated mode: position tuned for the rotated composition.
+  GRect text_bounds_rotated = GRect(32, 20, 160, 90);
+  GRect day_bounds_rotated = GRect(10, 95, 200, 60);
 
-  // Begin the special-draw session - everything drawn between begin/end
-  // gets rotated together as one unit when the session ends.
-  GSpecialSession *session = graphics_context_begin_special_draw(ctx);
+  // Straight (non-rotated) mode: separate position, shifted down and left
+  // per feedback - estimate, needs tuning once you see it rendered.
+  GRect text_bounds_straight = GRect(15, 30, 160, 90);
+  GRect day_bounds_straight = GRect(-50, 105, 200, 60);
 
-  // thickness of 2 = a noticeably bolder outline than the original 1px
-  draw_outlined_text(ctx, s_time_buffer, s_time_font, text_bounds, GColorRed, 2);
+  if (s_rotated_text) {
+    GRect text_bounds = text_bounds_rotated;
+    GRect day_bounds = day_bounds_rotated;
 
-  // Negative angle flips rotation direction (Pebble rotates clockwise for
-  // positive values) - flipped per feedback that it was tilting the wrong way.
-  // NOTE: this rotates around the fixed screen center (100, 114), not
-  // around the text's own position - since our text sits well above that
-  // (around y=45-95), it may swing/shift visibly rather than tilting
-  // cleanly in place. May need text_bounds repositioned once you see the
-  // actual result, to compensate for that arc.
-  graphics_context_special_session_add_modifier(session,
-      graphics_special_draw_create_rotation_modifier(-(TRIG_MAX_ANGLE / 12)));
+    // Begin the special-draw session - everything drawn between begin/end
+    // gets rotated TOGETHER as one unit when the session ends. Drawing the
+    // day name in here too (rather than a second session) means it shares
+    // the same single rotation pass and costs almost nothing extra on top
+    // of what the time text already costs.
+    GSpecialSession *session = graphics_context_begin_special_draw(ctx);
 
-  graphics_context_end_special_draw(session); // actually draws the rotated result and cleans up
+    // thickness of 2 = a noticeably bolder outline than the original 1px
+    draw_outlined_text(ctx, s_time_buffer, s_time_font, text_bounds, GColorRed, 2);
+
+    if (s_show_weekday) {
+      // thinner outline for the smaller day text, proportionally similar weight
+      draw_outlined_text(ctx, s_day_buffer, s_day_font, day_bounds, GColorRed, 1);
+    }
+
+    // Negative angle flips rotation direction (Pebble rotates clockwise for
+    // positive values) - flipped per feedback that it was tilting the wrong way.
+    // NOTE: this rotates around the fixed screen center (100, 114), not
+    // around the text's own position, so both text blocks swing together
+    // around that point - may need bounds repositioned once you see the
+    // actual result, to compensate for that arc.
+    graphics_context_special_session_add_modifier(session,
+        graphics_special_draw_create_rotation_modifier(-(TRIG_MAX_ANGLE / 12)));
+
+    graphics_context_end_special_draw(session); // actually draws the rotated result and cleans up
+  } else {
+    // Rotated Text OFF - plain upright drawing, no special-draw session at
+    // all. This completely skips the expensive rotation operation, not
+    // just a lighter version of it. Uses its own separate position.
+    draw_outlined_text(ctx, s_time_buffer, s_time_font, text_bounds_straight, GColorRed, 2);
+    if (s_show_weekday) {
+      draw_outlined_text(ctx, s_day_buffer, s_day_font, day_bounds_straight, GColorRed, 1);
+    }
+  }
 }
 
-// Overlay layer: battery dots and burst effect, entirely separate from the
-// time layer above - redrawing this never touches special-draw/rotation.
+// Overlay layer: battery dots, entirely separate from the time layer above
+// - redrawing this never touches special-draw/rotation.
 static void overlay_update_proc(Layer *layer, GContext *ctx) {
-  draw_battery_dots(ctx);
-  draw_burst(ctx);
+  if (s_show_battery) {
+    draw_battery_dots(ctx);
+  }
 }
 
 static void update_time() {
@@ -195,15 +150,15 @@ static void update_time() {
   strftime(s_time_buffer, sizeof(s_time_buffer), clock_is_24h_style() ?
                                                     "%H:%M" : "%I:%M", tick_time);
 
+  // Full weekday name, e.g. "Wednesday"
+  strftime(s_day_buffer, sizeof(s_day_buffer), "%A", tick_time);
+
   // Trigger a redraw of the custom time layer
   layer_mark_dirty(s_time_layer);
 }
 
 static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
   update_time();
-  if (units_changed & HOUR_UNIT) {
-    start_burst();
-  }
 }
 
 // Boundaries: <25% = 1 dot (red), <50% = 2 (yellow), <75% = 3 (green),
@@ -222,6 +177,34 @@ static void update_battery_dots(BatteryChargeState state) {
     s_battery_dots = 4;
     s_battery_color = GColorTiffanyBlue; // closest built-in to teal/blue-green
   }
+  layer_mark_dirty(s_overlay_layer);
+}
+
+// Receives settings from the Clay config page and saves them to persistent
+// storage so they survive an app restart. Buffer sizes are set explicitly
+// small in app_message_open() below (256 bytes each) rather than the
+// platform maximum - a real advantage of native C over the Alloy project's
+// Message class, which couldn't do this.
+static void inbox_received_handler(DictionaryIterator *iterator, void *context) {
+  Tuple *battery_tuple = dict_find(iterator, MESSAGE_KEY_ShowBattery);
+  if (battery_tuple) {
+    s_show_battery = battery_tuple->value->int32 == 1;
+    persist_write_bool(MESSAGE_KEY_ShowBattery, s_show_battery);
+  }
+
+  Tuple *weekday_tuple = dict_find(iterator, MESSAGE_KEY_ShowWeekday);
+  if (weekday_tuple) {
+    s_show_weekday = weekday_tuple->value->int32 == 1;
+    persist_write_bool(MESSAGE_KEY_ShowWeekday, s_show_weekday);
+  }
+
+  Tuple *rotated_tuple = dict_find(iterator, MESSAGE_KEY_RotatedText);
+  if (rotated_tuple) {
+    s_rotated_text = rotated_tuple->value->int32 == 1;
+    persist_write_bool(MESSAGE_KEY_RotatedText, s_rotated_text);
+  }
+
+  layer_mark_dirty(s_time_layer);
   layer_mark_dirty(s_overlay_layer);
 }
 
@@ -244,11 +227,12 @@ static void main_window_load(Window *window) {
   layer_set_update_proc(s_time_layer, time_layer_update_proc);
 
   s_time_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_BADA_72));
+  s_day_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_BADA_30));
 
   // Time layer goes on top of the background image
   layer_add_child(window_layer, s_time_layer);
 
-  // Overlay layer (battery dots, burst) goes on top of everything else
+  // Overlay layer (battery dots) goes on top of everything else
   s_overlay_layer = layer_create(bounds);
   layer_set_update_proc(s_overlay_layer, overlay_update_proc);
   layer_add_child(window_layer, s_overlay_layer);
@@ -259,9 +243,10 @@ static void main_window_load(Window *window) {
 }
 
 static void main_window_unload(Window *window) {
-  // Destroy time layer and font
+  // Destroy time layer and fonts
   layer_destroy(s_time_layer);
   fonts_unload_custom_font(s_time_font);
+  fonts_unload_custom_font(s_day_font);
 
   layer_destroy(s_overlay_layer);
 
@@ -270,13 +255,20 @@ static void main_window_unload(Window *window) {
   bitmap_layer_destroy(s_background_layer);
 
   battery_state_service_unsubscribe();
-
-  if (s_burst_timer) {
-    app_timer_cancel(s_burst_timer);
-  }
 }
 
 static void init() {
+  // Load saved settings, if any exist from a previous run
+  if (persist_exists(MESSAGE_KEY_ShowBattery)) {
+    s_show_battery = persist_read_bool(MESSAGE_KEY_ShowBattery);
+  }
+  if (persist_exists(MESSAGE_KEY_ShowWeekday)) {
+    s_show_weekday = persist_read_bool(MESSAGE_KEY_ShowWeekday);
+  }
+  if (persist_exists(MESSAGE_KEY_RotatedText)) {
+    s_rotated_text = persist_read_bool(MESSAGE_KEY_RotatedText);
+  }
+
   s_main_window = window_create();
 
   window_set_window_handlers(s_main_window, (WindowHandlers) {
@@ -289,12 +281,12 @@ static void init() {
   // Make sure the time is displayed from the start
   update_time();
 
-  // Register with TickTimerService for both per-minute clock updates and
-  // hourly burst triggers
-  tick_timer_service_subscribe(MINUTE_UNIT | HOUR_UNIT, tick_handler);
+  // Register with TickTimerService
+  tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
 
-  // Launch burst
-  start_burst();
+  // Settings - small explicit buffer sizes, not the platform maximum
+  app_message_register_inbox_received(inbox_received_handler);
+  app_message_open(256, 256);
 }
 
 static void deinit() {
